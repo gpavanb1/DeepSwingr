@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tesseract_core import Tesseract
+from scipy.integrate import solve_ivp
 
 
 def simulate_trajectory(
@@ -19,37 +20,35 @@ def simulate_trajectory(
 ):
     """Simulate cricket ball trajectory using simplephysics tesseract for aerodynamic forces."""
 
-    v0 = initial_velocity
-    theta = jnp.deg2rad(release_angle)
+    # Constants
+    mass = 0.156  # kg
+    diameter = 0.07  # m
+    rho_air = 1.225  # kg/m³
+    mu = 1.5e-5  # Pa·s
+    g = 9.81  # m/s²
 
-    vx = v0 * jnp.cos(theta)
-    vy = 0.0
-    vz = v0 * jnp.sin(theta)
-
-    x, y, z = 0.0, 0.0, 2.0
-
-    mass = 0.156
-    diameter = 0.07
-    rho_air = 1.225
-    mu = 1.5e-5
-    g = 9.81
-
-    positions = [[x, y, z]]
-    velocities = [[vx, vy, vz]]
-    times = [0.0]
-
-    t = 0.0
-    max_time = 5.0
-    step_count = 0
+    # Initial conditions
+    theta = np.deg2rad(release_angle)
+    v0_x = initial_velocity * np.cos(theta)
+    v0_y = 0.0
+    v0_z = initial_velocity * np.sin(theta)
+    y0 = [0.0, 0.0, 2.0,  # Initial positions (x, y, z)
+          v0_x, v0_y, v0_z]  # Initial velocities (vx, vy, vz)
 
     # Connect to pre-started simplephysics via URL
-    # Using the network alias 'simplephysics' on port 8000
     physics = Tesseract.from_url("http://simplephysics:8000")
 
-    while x < pitch_length and z > 0 and t < max_time:
-        v_mag = jnp.sqrt(vx**2 + vy**2 + vz**2)
+    def ball_dynamics(t, y):
+        """System of ODEs for ball motion."""
+        x, y_pos, z, vx, vy, vz = y
+
+        # Calculate velocity magnitude and Reynolds number
+        v_mag = np.sqrt(vx**2 + vy**2 + vz**2)
         Re = rho_air * v_mag * diameter / mu
-        Re = jnp.clip(Re, 1e5, 1e6)
+        Re = np.clip(Re, 1e5, 1e6)
+
+        if v_mag < 1e-6:
+            return [0, 0, 0, 0, 0, 0]
 
         # Get forces from simplephysics tesseract
         forces = physics.apply({
@@ -58,20 +57,12 @@ def simulate_trajectory(
             "roughness": roughness
         })['force_vector']
 
-        if debug and step_count < 3:
-            print(f"\nStep {step_count}:")
-            print(f"  Velocity: {v_mag:.2f} m/s ({v_mag*3.6:.1f} km/h)")
-            print(f"  Reynolds: {Re:.2e}")
-            print(
-                f"  Forces: Drag={forces[0]:.4f}N, Lift={forces[1]:.4f}N, Side={forces[2]:.4f}N")
+        # Unit vectors for velocity components
+        vx_norm = vx / v_mag
+        vy_norm = vy / v_mag
+        vz_norm = vz / v_mag
 
-        if v_mag > 1e-6:
-            vx_norm = vx / v_mag
-            vy_norm = vy / v_mag
-            vz_norm = vz / v_mag
-        else:
-            break
-
+        # Force components
         F_drag_x = -forces[0] * vx_norm
         F_drag_y = -forces[0] * vy_norm
         F_drag_z = -forces[0] * vz_norm
@@ -79,48 +70,59 @@ def simulate_trajectory(
         F_lift_z = forces[1]
         F_swing_y = forces[2]
 
+        # Total forces
         Fx = F_drag_x
         Fy = F_drag_y + F_swing_y
         Fz = F_drag_z + F_lift_z - mass * g
 
-        if debug and step_count < 3:
-            print(
-                f"  Applied Forces: Fx={Fx:.4f}N, Fy={Fy:.4f}N, Fz={Fz:.4f}N")
-            print(f"  Gravity: {-mass*g:.4f}N")
-
+        # Accelerations
         ax = Fx / mass
         ay = Fy / mass
         az = Fz / mass
 
-        vx = vx + ax * dt
-        vy = vy + ay * dt
-        vz = vz + az * dt
+        return [vx, vy, vz, ax, ay, az]
 
-        x = x + vx * dt
-        y = y + vy * dt
-        z = z + vz * dt
+    def event_ground_or_pitch(t, y):
+        """Stop integration when ball hits ground or reaches pitch length."""
+        return min(y[2], pitch_length - y[0])  # z=0 or x=pitch_length
+    event_ground_or_pitch.terminal = True
 
-        t = t + dt
-        step_count += 1
+    # Solve ODE system
+    t_span = (0, 5.0)  # Max time 5 seconds
+    t_eval = np.arange(0, 5.0, dt)
 
-        if step_count % 10 == 0:
-            positions.append([float(x), float(y), float(z)])
-            velocities.append([float(vx), float(vy), float(vz)])
-            times.append(float(t))
+    solution = solve_ivp(
+        ball_dynamics,
+        t_span,
+        y0,
+        method='RK45',
+        t_eval=t_eval,
+        events=event_ground_or_pitch,
+        rtol=1e-6,
+        atol=1e-6
+    )
+
+    # Extract results
+    times = solution.t
+    positions = np.column_stack([
+        solution.y[0],  # x positions
+        solution.y[1],  # y positions
+        solution.y[2]   # z positions
+    ])
+    velocities = np.column_stack([
+        solution.y[3],  # vx
+        solution.y[4],  # vy
+        solution.y[5]   # vz
+    ])
 
     if debug:
         print(f"\nFinal statistics:")
-        print(f"  Total steps: {step_count}")
-        print(f"  Flight time: {t:.3f}s")
-        print(f"  Distance: {x:.2f}m")
-        print(f"  Lateral deviation: {abs(y)*100:.2f}cm")
-        print(f"  Final position: x={x:.2f}, y={y:.4f}, z={z:.2f}")
-
-    positions = np.array(positions)
-    velocities = np.array(velocities)
-    times = np.array(times)
-
-    if debug:
+        print(f"  Total steps: {len(times)}")
+        print(f"  Flight time: {times[-1]:.3f}s")
+        print(f"  Distance: {positions[-1, 0]:.2f}m")
+        print(f"  Lateral deviation: {abs(positions[-1, 1])*100:.2f}cm")
+        print(
+            f"  Final position: x={positions[-1, 0]:.2f}, y={positions[-1, 1]:.4f}, z={positions[-1, 2]:.2f}")
         print(
             f"  Y range: min={positions[:, 1].min():.4f}, max={positions[:, 1].max():.4f}")
 

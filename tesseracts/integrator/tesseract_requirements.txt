@@ -5,6 +5,7 @@
 jax[cpu]
 equinox
 tesseract-core
+scipy
 
 # This may contain private dependencies via SSH URLs:
 # git+ssh://git@github.com/username/repo.git@branch

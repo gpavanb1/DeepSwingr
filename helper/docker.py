@@ -50,80 +50,93 @@ def ensure_docker_network(network_name: str) -> bool:
         sys.exit(1)
 
 
-def ensure_simplephysics_container(network_name: str):
-    """Start simplephysics container if not already running"""
-    print("\n🔍 Checking simplephysics container...")
+def ensure_physics_container(container_name: str, image_name: str,
+                             network_name: str, host_port: int):
+    """Start a physics container if not already running"""
+    print(f"\n🔍 Checking {container_name} container...")
 
     # Check if already running
     check = subprocess.run(
-        ["docker", "ps", "--filter", "name=simplephysics",
+        ["docker", "ps", "--filter", f"name={container_name}",
             "--format", "{{.Names}}"],
         capture_output=True,
         text=True,
     )
-    if "simplephysics" in check.stdout:
-        print("✓ simplephysics is already running")
+    if container_name in check.stdout:
+        print(f"✓ {container_name} is already running")
         return
 
-    print("  Cleaning up old simplephysics container if any...")
-    subprocess.run(["docker", "stop", "simplephysics"],
+    print(f"  Cleaning up old {container_name} container if any...")
+    subprocess.run(["docker", "stop", container_name],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["docker", "rm", "simplephysics"],
+    subprocess.run(["docker", "rm", container_name],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    print("  Starting simplephysics container...")
+    print(f"  Starting {container_name} container on port {host_port}...")
     result = subprocess.run([
         "docker", "run", "-d",
-        "--name", "simplephysics",
+        "--name", container_name,
         "--network", network_name,
-        "--network-alias", "simplephysics",
-        "-p", "8000:8000",
-        "simplephysics",
+        "--network-alias", container_name,
+        "-p", f"{host_port}:8000",  # Map host_port to container's 8000
+        image_name,
         "serve", "--host", "0.0.0.0", "--port", "8000"
     ], capture_output=True, text=True)
 
     if result.returncode != 0:
-        print(f"❌ Failed to start simplephysics container:")
+        print(f"❌ Failed to start {container_name} container:")
         print(result.stderr)
-        raise RuntimeError("Failed to start simplephysics container")
+        raise RuntimeError(f"Failed to start {container_name} container")
 
-    print("✓ simplephysics container started")
+    print(f"✓ {container_name} container started")
 
     # Wait for it to be ready
-    print("  Waiting for simplephysics to be ready...")
+    print(f"  Waiting for {container_name} to be ready...")
     max_wait = 30
     for i in range(max_wait):
         time.sleep(1)
         check = subprocess.run(
-            ["docker", "ps", "--filter", "name=simplephysics",
+            ["docker", "ps", "--filter", f"name={container_name}",
                 "--format", "{{.Names}}"],
             capture_output=True,
             text=True,
         )
-        if "simplephysics" not in check.stdout:
-            print("❌ simplephysics container stopped unexpectedly")
+        if container_name not in check.stdout:
+            print(f"❌ {container_name} container stopped unexpectedly")
             logs = subprocess.run(
-                ["docker", "logs", "simplephysics"], capture_output=True, text=True)
+                ["docker", "logs", container_name], capture_output=True, text=True)
             print(logs.stdout)
             print(logs.stderr)
-            raise RuntimeError("simplephysics container stopped unexpectedly")
+            raise RuntimeError(
+                f"{container_name} container stopped unexpectedly")
 
         health_check = subprocess.run(
-            ["curl", "-f", "http://localhost:8000/health"],
+            ["curl", "-f", f"http://localhost:{host_port}/health"],
             capture_output=True,
             text=True,
         )
         if health_check.returncode == 0:
-            print(f"✓ simplephysics is ready (took {i+1}s)")
+            print(f"✓ {container_name} is ready (took {i+1}s)")
             break
         if i == max_wait - 1:
-            print("⚠️  Warning: simplephysics may not be fully ready")
+            print(f"⚠️  Warning: {container_name} may not be fully ready")
             logs = subprocess.run(
-                ["docker", "logs", "simplephysics"], capture_output=True, text=True)
-            print(logs.stdout[-500:])
+                ["docker", "logs", container_name], capture_output=True, text=True)
+            print(logs.stdout[-500:] if logs.stdout else "No logs")
 
 
-def prepare_docker_environment(network_name: str):
+def ensure_simplephysics_container(network_name: str):
+    """Start simplephysics container if not already running"""
+    ensure_physics_container(
+        "simplephysics", "simplephysics", network_name, 8000)
+
+
+def ensure_jaxphysics_container(network_name: str):
+    """Start jaxphysics container if not already running"""
+    ensure_physics_container("jaxphysics", "jaxphysics", network_name, 8001)
+
+
+def prepare_docker_environment(network_name: str, use_jaxphysics: bool = True):
     """Set up Docker environment including network and containers"""
     print(f"============================================================")
     print(f"  CRICKET BALL TRAJECTORY SIMULATION DEMO")
@@ -132,12 +145,19 @@ def prepare_docker_environment(network_name: str):
     ensure_docker_network(network_name)
     ensure_simplephysics_container(network_name)
 
+    if use_jaxphysics:
+        ensure_jaxphysics_container(network_name)
+
 
 def cleanup_containers():
     """Stop and remove containers"""
     print("\n🧹 Cleaning up all containers...")
-    subprocess.run(["docker", "stop", "simplephysics"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["docker", "rm", "simplephysics"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    containers = ["simplephysics", "jaxphysics", "integrator"]
+    for container in containers:
+        subprocess.run(["docker", "stop", container],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "rm", container],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     print("✓ Cleanup complete")

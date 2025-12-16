@@ -1,9 +1,7 @@
 """
 Cricket Ball Trajectory Simulator
-Simulates ball flight over 22 yards using trained neural network for aerodynamics.
+Simulates ball flight over 22 yards using configurable physics backend.
 """
-import jax
-import jax.numpy as jnp
 import numpy as np
 from tesseract_core import Tesseract
 from scipy.integrate import solve_ivp
@@ -14,12 +12,27 @@ def simulate_trajectory(
     release_angle: float,
     roughness: float,
     seam_angle: float,
+    physics_url: str = "http://simplephysics:8000",
     dt: float = 0.001,
     pitch_length: float = 20.12,
     debug: bool = False
 ):
-    """Simulate cricket ball trajectory using simplephysics tesseract for aerodynamic forces."""
+    """
+    Simulate cricket ball trajectory using configurable physics backend.
 
+    Args:
+        initial_velocity: Initial ball velocity in m/s
+        release_angle: Release angle in degrees
+        roughness: Surface roughness coefficient [0.0, 1.0]
+        seam_angle: Seam angle in degrees [-90, 90]
+        physics_url: URL of physics tesseract (simplephysics or jaxphysics)
+        dt: Time step for integration
+        pitch_length: Length of cricket pitch in meters
+        debug: Print debug information
+
+    Returns:
+        times, x_positions, y_positions, z_positions, velocities
+    """
     # Constants
     mass = 0.156  # kg
     diameter = 0.07  # m
@@ -32,11 +45,15 @@ def simulate_trajectory(
     v0_x = initial_velocity * np.cos(theta)
     v0_y = 0.0
     v0_z = initial_velocity * np.sin(theta)
+
     y0 = [0.0, 0.0, 2.0,  # Initial positions (x, y, z)
           v0_x, v0_y, v0_z]  # Initial velocities (vx, vy, vz)
 
-    # Connect to pre-started simplephysics via URL
-    physics = Tesseract.from_url("http://simplephysics:8000")
+    # Connect to physics backend via URL
+    physics = Tesseract.from_url(physics_url)
+
+    if debug:
+        print(f"Using physics backend: {physics_url}")
 
     def ball_dynamics(t, y):
         """System of ODEs for ball motion."""
@@ -50,7 +67,7 @@ def simulate_trajectory(
         if v_mag < 1e-6:
             return [0, 0, 0, 0, 0, 0]
 
-        # Get forces from simplephysics tesseract
+        # Get forces from physics tesseract
         forces = physics.apply({
             "notch_angle": seam_angle,
             "reynolds_number": float(Re),
@@ -85,6 +102,7 @@ def simulate_trajectory(
     def event_ground_or_pitch(t, y):
         """Stop integration when ball hits ground or reaches pitch length."""
         return min(y[2], pitch_length - y[0])  # z=0 or x=pitch_length
+
     event_ground_or_pitch.terminal = True
 
     # Solve ODE system
@@ -109,6 +127,7 @@ def simulate_trajectory(
         solution.y[1],  # y positions
         solution.y[2]   # z positions
     ])
+
     velocities = np.column_stack([
         solution.y[3],  # vx
         solution.y[4],  # vy
@@ -116,7 +135,8 @@ def simulate_trajectory(
     ])
 
     if debug:
-        print(f"\nFinal statistics:")
+        physics_name = "JAX-CFD" if "jaxphysics" in physics_url else "Simple"
+        print(f"\n[{physics_name}] Final statistics:")
         print(f"  Total steps: {len(times)}")
         print(f"  Flight time: {times[-1]:.3f}s")
         print(f"  Distance: {positions[-1, 0]:.2f}m")

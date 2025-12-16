@@ -6,7 +6,7 @@ jax[cpu]
 equinox
 flax
 optax
-jax-cfd
+jax-cfd[complete]
 
 # This may contain private dependencies via SSH URLs:
 # git+ssh://git@github.com/username/repo.git@branch

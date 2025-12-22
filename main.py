@@ -1,222 +1,80 @@
-"""
-Minimal Main - Tesseract Cricket Ball Simulator
-
-Functions:
-- show_trajectory: Display trajectory for given parameters
-- plot_optimal: Plot optimal swing vs speed and notch_angle
-"""
 import numpy as np
 import matplotlib.pyplot as plt
 from helper.docker import setup_tesseracts, cleanup_containers
 from plotter.plt import plot_trajectory_3d
 
-
-def show_trajectory(initial_velocity=35.0, release_angle=5.0, roughness=0.8, seam_angle=30.0,
-                   physics_url="http://simplephysics:8000"):
-    """
-    Show trajectory for given parameter set
-
-    Args:
-        initial_velocity: Ball speed in m/s
-        release_angle: Release angle in degrees
-        roughness: Surface roughness [0.0, 1.0]
-        seam_angle: Seam angle in degrees [-90, 90]
-        physics_url: Physics backend URL
-    """
+def show_trajectory(v=35.0, a=5.0, r=0.8, s=30.0, url="http://simplephysics:8000"):
+    """Show trajectory for given parameters"""
     try:
-        integrator, swing, optimizer = setup_tesseracts("tesseract_network")
-
+        integrator, _, _ = setup_tesseracts("tesseract_network")
         with integrator:
-            # Get trajectory
-            params = {
-                "initial_velocity": initial_velocity,
-                "release_angle": release_angle,
-                "roughness": roughness,
-                "seam_angle": seam_angle,
-                "physics_url": physics_url
-            }
-
-            result = integrator.apply(params)
-
-            # Plot trajectory
-            fig = plot_trajectory_3d(
-                result["times"],
-                result["x_positions"],
-                result["y_positions"],
-                result["z_positions"],
-                result.get("velocities"),
-                initial_velocity,
-                roughness,
-                seam_angle,
-                use_plotly=True
-            )
-            fig.show()
-
+            res = integrator.apply({"initial_velocity": v, "release_angle": a, "roughness": r, "seam_angle": s, "physics_url": url})
+            plot_trajectory_3d(res["times"], res["x_positions"], res["y_positions"], res["z_positions"], 
+                               res.get("velocities"), v, r, s, use_plotly=True).show()
     except Exception as e:
         print(f"Error: {e}")
     finally:
         cleanup_containers()
 
-
-def plot_optimal(roughness=0.8, release_angle=5.0, swing_type="reverse",
-                speed_range=[30, 40], angle_range=[-45, 45],
-                n_points=10):
-    """
-    Plot optimal swing vs speed and notch_angle for specified roughness and release angle
-
-    Args:
-        roughness: Fixed surface roughness
-        release_angle: Fixed release angle in degrees
-        swing_type: "in", "out", or "reverse"
-        speed_range: [min_speed, max_speed] in m/s
-        angle_range: [min_angle, max_angle] in degrees
-        n_points: Number of points to sample in each dimension
-    """
-    network_name = "tesseract_network"
-
+def plot_optimal(r=0.8, a=5.0, swing_type="out", speed_range=[30, 40], n=5):
+    """Plot optimal swing vs speed"""
     try:
-        integrator, swing, optimizer = setup_tesseracts(network_name)
-
-        with optimizer:
+        _, _, opt = setup_tesseracts("tesseract_network")
+        with opt:
             print(f"Optimizing {swing_type} swing...")
-
-            # Create parameter grid
-            speeds = np.linspace(speed_range[0], speed_range[1], n_points)
-
-            # Store results
-            optimal_deviations = np.zeros(n_points)
-
-            for i, speed in enumerate(speeds):
+            speeds = np.linspace(speed_range[0], speed_range[1], n)
+            devs = []
+            for i, v in enumerate(speeds):
+                print(f"  [{i+1}/{n}] {v:.1f} m/s:", end=" ", flush=True)
                 try:
-                    # Prepare optimization parameters
-                    opt_params = {
-                        "fixed_variables": {
-                            "initial_velocity": speed,
-                            "release_angle": release_angle,
-                            "roughness": roughness
-                        },
-                        "optimization_variables": {
-                            "seam_angle": [angle_range[0], angle_range[1]]
-                        },
-                        "swing_type": swing_type,
-                        "swing_url": "http://swing:8000",
-                        "physics_url": "http://simplephysics:8000",
-                        "integrator_url": "http://integrator:8000"
-                    }
-
-                    # Optimize seam_angle for this fixed speed to maximize swing
-                    opt_result = optimizer.apply(opt_params)
-
-                    if opt_result and "maximum_deviation" in opt_result:
-                        optimal_deviations[i] = opt_result["maximum_deviation"]
-                    else:
-                        optimal_deviations[i] = np.nan
-
+                    res = opt.apply({
+                        "fixed_variables": {"initial_velocity": v, "release_angle": a, "roughness": r},
+                        "optimization_variables": {"seam_angle": [-45, 45]},
+                        "swing_type": swing_type
+                    })
+                    val = res["maximum_deviation"]
+                    devs.append(val)
+                    print(f"{val:.2f} cm")
                 except Exception as e:
-                    print(f"Optimization failed for speed={speed:.1f}: {e}")
-                    optimal_deviations[i] = np.nan
-
-            # Create plot
-            fig, ax = plt.subplots(figsize=(10, 6))
-            ax.plot(speeds, optimal_deviations, 'b-o', linewidth=2, markersize=6)
-            ax.set_xlabel('Initial Velocity (m/s)')
-            ax.set_ylabel('Maximum Deviation (cm)')
-            ax.set_title(f'Optimal {swing_type.capitalize()} Swing vs Speed (Roughness: {roughness:.1f})')
-            ax.grid(True, alpha=0.3)
-
-            # Mark optimal point
-            valid_indices = ~np.isnan(optimal_deviations)
-            if np.any(valid_indices):
-                max_idx = np.nanargmax(optimal_deviations)
-                max_speed = speeds[max_idx]
-                max_dev = optimal_deviations[max_idx]
-
-                ax.plot(max_speed, max_dev, 'ro', markersize=10, label=f'Global optimum: {max_dev:.2f} cm')
-                ax.legend()
-
-                plt.tight_layout()
+                    print(f"Failed: {e}")
+                    devs.append(np.nan)
+            
+            devs = np.array(devs)
+            valid = ~np.isnan(devs)
+            if np.any(valid):
+                plt.figure(figsize=(8, 5))
+                plt.plot(speeds[valid], devs[valid], 'b-o')
+                plt.xlabel("Speed (m/s)")
+                plt.ylabel("Max Deviation (cm)")
+                plt.title(f"Optimal {swing_type.capitalize()} Swing (r={r})")
+                plt.grid(True, alpha=0.3)
                 plt.show()
-
-                print("Global optimum found:")
-                print(f"  Speed: {max_speed:.1f} m/s")
-                print(f"  Maximum deviation: {max_dev:.2f} cm")
-            else:
-                print("No valid optimization results found")
-                plt.close(fig)
     except Exception as e:
         print(f"Error: {e}")
     finally:
         cleanup_containers()
-
-
-def interactive_menu():
-    """Interactive menu to choose between functions"""
-    print("🎾 Cricket Ball Swing Simulator")
-    print("=" * 40)
-    print("Choose an option:")
-    print("1. Show trajectory for specific parameters")
-    print("2. Plot optimal swing landscape")
-    print("3. Exit")
-
-    while True:
-        try:
-            choice = input("\nEnter choice (1-3): ").strip()
-
-            if choice == "1":
-                # Get parameters with defaults
-                vel = input("Initial velocity (m/s) [35.0]: ").strip()
-                vel = float(vel) if vel else 35.0
-
-                angle = input("Release angle (degrees) [5.0]: ").strip()
-                angle = float(angle) if angle else 5.0
-
-                rough = input("Roughness [0.8]: ").strip()
-                rough = float(rough) if rough else 0.8
-
-                seam = input("Seam angle (degrees) [30.0]: ").strip()
-                seam = float(seam) if seam else 30.0
-
-                show_trajectory(vel, angle, rough, seam)
-
-            elif choice == "2":
-                # Get parameters with defaults
-                rough = input("Roughness [0.8]: ").strip()
-                rough = float(rough) if rough else 0.8
-
-                angle = input("Release angle (degrees) [5.0]: ").strip()
-                angle = float(angle) if angle else 5.0
-
-                swing_type = input("Swing type (in/out/reverse) [reverse]: ").strip().lower()
-                swing_type = swing_type if swing_type in ["in", "out", "reverse"] else "reverse"
-
-                plot_optimal(rough, angle, swing_type)
-
-            elif choice == "3":
-                print("\n👋 Goodbye!")
-                break
-
-            else:
-                print("❌ Invalid choice. Please enter 1, 2, or 3.")
-
-        except KeyboardInterrupt:
-            print("\n\n⚠️  Interrupted by user")
-            break
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            print("Please try again.")
-
 
 def main():
-    """Main entry point - run interactive menu"""
-    try:
-        interactive_menu()
-    except KeyboardInterrupt:
-        print("\n\n⚠️  Interrupted by user")
-    except Exception as e:
-        print(f"❌ Unexpected error: {e}")
-        import traceback
-        traceback.print_exc()
-
+    while True:
+        print("\n🎾 Cricket Ball Simulator\n1. Trajectory\n2. Optimal Swing\n3. Exit")
+        choice = input("Choice: ").strip()
+        if choice == "3":
+            break
+        try:
+            if choice == "1":
+                show_trajectory(
+                    float(input("Initial velocity (m/s) [35.0]: ") or 35.0),
+                    float(input("Release angle (deg) [5.0]: ") or 5.0),
+                    float(input("Surface roughness (0-1) [0.8]: ") or 0.8),
+                    float(input("Seam angle (deg) [30.0]: ") or 30.0)
+                )
+            elif choice == "2":
+                plot_optimal(
+                    r=float(input("Surface roughness (0-1) [0.8]: ") or 0.8),
+                    swing_type=input("Swing type (in/out) [out]: ").lower() or "out"
+                )
+        except Exception as e:
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()

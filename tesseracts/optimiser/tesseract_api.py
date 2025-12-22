@@ -8,9 +8,9 @@ Outputs: optimal_parameters, maximum_deviation
 """
 from typing import Any, Dict, List, Literal
 import numpy as np
-import jax
-import jax.numpy as jnp
+import time
 from pydantic import BaseModel, Field, model_validator
+from scipy.optimize import minimize_scalar
 
 from tesseract_core.runtime import Float32
 
@@ -60,97 +60,50 @@ class OutputSchema(BaseModel):
 
 
 def optimize_swing(inputs: InputSchema) -> OutputSchema:
-    """Optimize swing parameters using distributed AD and L-BFGS-B"""
-    # Connect to swing tesseract
+    """Optimize swing parameters using fast scalar search (no gradients)"""
     from tesseract_core import Tesseract
-    from tesseract_jax import apply_tesseract
     swing_tesseract = Tesseract.from_url(inputs.swing_url)
 
-    # Get optimization variable names and bounds
-    opt_vars = list(inputs.optimization_variables.keys())
-    
-    # Create objective function with distributed Jacobian
-    def objective_with_grad(x):
-        # Convert to JAX array for AD
-        x_jax = jnp.array(x)
-
-        def jax_objective(x_jax):
-            params_dict = {opt_vars[i]: x_jax[i] for i in range(len(opt_vars))}
-
-            # Prepare input for swing tesseract
-            # We pass the JAX tracers directly into the framework
-            swing_inputs = {
-                "initial_velocity": inputs.fixed_variables.get("initial_velocity", 35.0),
-                "release_angle": inputs.fixed_variables.get("release_angle", 5.0),
-                "roughness": inputs.fixed_variables.get("roughness", 0.8),
-                "seam_angle": params_dict.get("seam_angle", 30.0)
-            }
-
-            # Add any other optimization variables
-            for var, val in params_dict.items():
-                swing_inputs[var] = val
-
-            # Use apply_tesseract from tesseract-jax for AD compatibility.
-            # This ensures that when JAX calls this within a transform (like jax.grad),
-            # it correctly handles tracers and makes the appropriate distributed calls.
-            res = apply_tesseract(swing_tesseract, swing_inputs)
-            deviation = res["final_deviation"]
-
-            # Logic for objective based on swing_type
-            if inputs.swing_type == "in":
-                score = deviation  # Minimize deviation (towards batsman)
-            else: # out
-                score = -deviation  # Minimize -deviation (away from batsman)
-
-            return score
-
-        # Compute function value and gradient using distributed AD
-        # The Tesseract SDK automatically handles the network calls to .jacobian
-        # when jax.grad is used on a function calling tesseract.apply()
-        score = jax_objective(x_jax)
-        grad_jax = jax.grad(jax_objective)(x_jax)
-
-        # Convert back to numpy for scipy optimizer
-        grad = np.array(grad_jax)
+    # We assume 1D optimization for seam_angle as it's the primary physical variable
+    opt_var = "seam_angle"
+    if opt_var not in inputs.optimization_variables:
+        # Fallback if seam_angle isn't the target, pick the first available
+        opt_var = list(inputs.optimization_variables.keys())[0]
         
-        # Convert score back to deviation for display
-        deviation = -float(score) if inputs.swing_type == "out" else float(score)
-        params_dict = {opt_vars[i]: float(x[i]) for i in range(len(opt_vars))}
+    bounds = inputs.optimization_variables[opt_var]
+    
+    def objective(x):
+        # Prepare input for swing tesseract
+        swing_inputs = {
+            **inputs.fixed_variables,
+            opt_var: float(x)
+        }
 
-        print(f"  Evaluation: deviation={deviation:.2f} cm, score={float(score):.2f}, params={params_dict}")
-        return float(score), grad.astype(float)
+        # Just a forward pass - much faster than a .jacobian() call
+        res = swing_tesseract.apply(swing_inputs)
+        deviation = float(res["final_deviation"])
 
-    # Use L-BFGS-B for bounded optimization with gradients
+        # Minimize negative deviation for "out", positive for "in"
+        # We use Brent's method which finds a minimum
+        score = deviation if inputs.swing_type == "in" else -deviation
+        
+        print(f"  Check {opt_var}={x:.2f} -> deviation={deviation:.2f} cm")
+        return score
+
     try:
-        import time
-        from scipy.optimize import minimize
         start_time = time.time()
-        print(f"Starting L-BFGS-B optimization using distributed AD Jacobian...")
+        print(f"Starting fast 1D search for optimal {opt_var}...")
 
-        # Initial guess: middle of each bound
-        x0 = []
-        bounds = []
-        for var in opt_vars:
-            b = inputs.optimization_variables[var]
-            x0.append((b[0] + b[1]) / 2.0)
-            bounds.append((b[0], b[1]))
-
-        # Run optimization
-        result = minimize(
-            objective_with_grad,
-            x0=x0,
-            bounds=bounds,
-            method='L-BFGS-B',
-            jac=True,
-            options={
-                'maxiter': 20,
-                'ftol': 1e-3,
-            }
+        # Brent's method is extremely fast for 1D smooth functions
+        result = minimize_scalar(
+            objective,
+            bounds=(bounds[0], bounds[1]),
+            method='bounded',
+            options={'xatol': 0.1, 'maxiter': 10} # 10 steps is plenty for 1D
         )
 
         elapsed = time.time() - start_time
-        print(f"Optimization completed in {elapsed:.1f} seconds")
-        print(f"Success: {result.success}, Evaluations: {result.nfev}")
+        print(f"Optimization completed in {elapsed:.1f} seconds ({result.nfev} evaluations)")
 
     except Exception as e:
         print(f"Optimization failed: {e}")
@@ -158,19 +111,14 @@ def optimize_swing(inputs: InputSchema) -> OutputSchema:
         traceback.print_exc()
         raise
 
-    # Extract optimal parameters
-    optimal_params = {opt_vars[i]: float(result.x[i]) for i in range(len(opt_vars))}
+    optimal_params = {opt_var: float(result.x)}
     
-    # Get final deviation for the output
-    final_res = swing_tesseract.apply({
-        **inputs.fixed_variables,
-        **optimal_params
-    })
-    final_deviation = float(final_res["final_deviation"])
+    # Final deviation is the value found by the optimizer (remembering to flip sign for 'out')
+    max_dev = -float(result.fun) if inputs.swing_type == "out" else float(result.fun)
 
     return OutputSchema(
         optimal_parameters=optimal_params,
-        maximum_deviation=abs(final_deviation)
+        maximum_deviation=abs(max_dev)
     )
 
 

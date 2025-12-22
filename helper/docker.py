@@ -141,9 +141,9 @@ def ensure_jaxphysics_container(network_name: str):
 
 def prepare_docker_environment(network_name: str, use_jaxphysics: bool = True):
     """Set up Docker environment including network and containers"""
-    print(f"============================================================")
-    print(f"  CRICKET BALL TRAJECTORY SIMULATION DEMO")
-    print(f"============================================================")
+    print("============================================================")
+    print("  CRICKET BALL TRAJECTORY SIMULATION DEMO")
+    print("============================================================")
 
     ensure_docker_network(network_name)
     ensure_simplephysics_container(network_name)
@@ -154,7 +154,13 @@ def prepare_docker_environment(network_name: str, use_jaxphysics: bool = True):
 
 def cleanup_containers():
     """Stop and remove containers"""
+    global _INTEGRATOR, _SWING, _OPTIMIZER
     print("\n🧹 Cleaning up all containers...")
+    
+    # Reset globals
+    _INTEGRATOR = None
+    _SWING = None
+    _OPTIMIZER = None
 
     containers = ["simplephysics", "jaxphysics", "integrator", "swing", "optimiser"]
     for container in containers:
@@ -164,6 +170,21 @@ def cleanup_containers():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     print("✓ Cleanup complete")
+
+
+# Global tesseracts to avoid restarting containers on every call
+_INTEGRATOR = None
+_SWING = None
+_OPTIMIZER = None
+
+
+def get_tesseracts(network_name="tesseract_network"):
+    """Get or setup tesseracts (singleton pattern)"""
+    global _INTEGRATOR, _SWING, _OPTIMIZER
+    if _INTEGRATOR is None:
+        print("🔍 Starting Tesseracts (first time setup)...")
+        _INTEGRATOR, _SWING, _OPTIMIZER = setup_tesseracts(network_name)
+    return _INTEGRATOR, _SWING, _OPTIMIZER
 
 
 def setup_tesseracts(network_name="tesseract_network"):

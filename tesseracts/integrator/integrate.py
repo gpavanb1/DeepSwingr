@@ -16,7 +16,7 @@ def simulate_trajectory(
     roughness: float,
     seam_angle: float,
     physics_url: str = "http://simplephysics:8000",
-    dt: float = 0.05,  # Increased default dt for faster simulation
+    dt: float = 0.08, # Increased default dt for faster simulation
     pitch_length: float = 20.12,
     debug: bool = False
 ):
@@ -94,18 +94,18 @@ def simulate_trajectory(
     # Solve ODE system
     term = dfx.ODETerm(ball_dynamics)
     
-    # Use Heun's method (2nd order) instead of Tsit5 (5th order adaptive)
-    # for faster execution during the "show trajectory" path.
+    # Use Heun's method (2nd order) for faster execution
     solver = dfx.Heun()
     
     # We want exactly 500 points for the trajectory
     max_steps = 500
-    t0, t1 = 0.0, 1.5  # Reduced max flight time (ball usually hits at ~0.5-0.7s)
+    t0, t1 = 0.0, 1.2  # Ball always finishes before 1.2s
     
     # Use SaveAt to get exactly 500 points
     saveat = dfx.SaveAt(ts=jnp.linspace(t0, t1, max_steps))
     
-    # Wrap the solver in JIT for better performance
+    # Use RecursiveCheckpointAdjoint for MUCH faster gradients
+    # and ConstantStepSize to avoid adaptive overhead
     @jax.jit
     def run_solve(y0_val):
         return dfx.diffeqsolve(
@@ -116,6 +116,8 @@ def simulate_trajectory(
             dt0=dt,
             y0=y0_val,
             saveat=saveat,
+            stepsize_controller=dfx.ConstantStepSize(),
+            adjoint=dfx.RecursiveCheckpointAdjoint(),
             max_steps=max_steps,
         )
 
@@ -130,21 +132,5 @@ def simulate_trajectory(
     vz = sol.ys[:, 5]
     
     velocities = jnp.stack([vx, vy, vz], axis=-1)
-
-    return times, x, y, z, velocities
-
-    times = sol.ts
-    x = sol.ys[:, 0]
-    y = sol.ys[:, 1]
-    z = sol.ys[:, 2]
-    vx = sol.ys[:, 3]
-    vy = sol.ys[:, 4]
-    vz = sol.ys[:, 5]
-    
-    velocities = jnp.stack([vx, vy, vz], axis=-1)
-
-    if debug:
-        # Note: debug print might not work inside JAX transformations
-        pass
 
     return times, x, y, z, velocities

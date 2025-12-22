@@ -1,16 +1,11 @@
-# Copyright 2025 Pasteur Labs. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-"""
-Tesseract API module for swing tesseract
-Inputs: initial_velocity, release_angle, roughness, seam_angle, physics_url, integrator_url
-Outputs: maximum_deviation (maximum lateral deviation from swing in cm)
-"""
+import jax
+import jax.numpy as jnp
 from typing import Any
-import numpy as np
 from pydantic import BaseModel, Field
+from tesseract_jax import apply_tesseract
+from tesseract_core import Tesseract
 
-from tesseract_core.runtime import Float32, Differentiable
+from tesseract_core.runtime import Float32, Differentiable, ShapeDType
 
 
 class InputSchema(BaseModel):
@@ -23,89 +18,85 @@ class InputSchema(BaseModel):
         ..., description="Ball surface roughness [0.0, 1.0]")
     seam_angle: Differentiable[Float32] = Field(
         ..., description="Seam angle in degrees [-90.0, 90.0]")
-    physics_url: str = Field(
-        default="http://simplephysics:8000",
-        description="URL of physics backend (simplephysics or jaxphysics)"
-    )
-    integrator_url: str = Field(
-        default="http://integrator:8000",
-        description="URL of integrator tesseract"
-    )
 
 
 class OutputSchema(BaseModel):
     """Output schema for swing tesseract"""
 
-    maximum_deviation: Differentiable[Float32] = Field(
-        ..., description="Maximum lateral deviation from swing in cm"
+    final_deviation: Differentiable[Float32] = Field(
+        ..., description="Final lateral deviation from swing in cm"
     )
 
 
-def compute_maximum_deviation(
+# Connect to integrator tesseract (Docker network alias)
+integrator_tesseract = Tesseract.from_url("http://integrator:8000")
+
+
+@jax.jit
+def compute_final_deviation(
     initial_velocity,
     release_angle,
     roughness,
-    seam_angle,
-    physics_url: str = "http://simplephysics:8000",
-    integrator_url: str = "http://integrator:8000"
+    seam_angle
 ):
     """
-    Get trajectory from integrator and compute maximum lateral deviation.
-
-    Args:
-        initial_velocity: Initial ball velocity in m/s (can be differentiable)
-        release_angle: Release angle in degrees (can be differentiable)
-        roughness: Surface roughness coefficient [0.0, 1.0] (can be differentiable)
-        seam_angle: Seam angle in degrees [-90, 90] (can be differentiable)
-        physics_url: URL of physics backend (string)
-        integrator_url: URL of integrator tesseract (string)
-
-    Returns:
-        Maximum lateral deviation in cm
+    Compute final lateral deviation using AD-enabled tesseract calls.
     """
-    # Connect to integrator tesseract
-    from tesseract_core import Tesseract
-    integrator = Tesseract.from_url(integrator_url)
-
-    # Convert differentiable inputs to regular values for integrator
-    # The integrator expects regular float values, not differentiable ones
-    vel_value = float(initial_velocity)
-    angle_value = float(release_angle)
-    rough_value = float(roughness)
-    seam_value = float(seam_angle)
-
-    # Get trajectory data from integrator
-    trajectory_result = integrator.apply({
-        "initial_velocity": vel_value,
-        "release_angle": angle_value,
-        "roughness": rough_value,
-        "seam_angle": seam_value,
-        "physics_url": physics_url
+    # Use apply_tesseract for AD compatibility through the framework
+    # This automatically handles distributed automatic differentiation
+    trajectory_result = apply_tesseract(integrator_tesseract, {
+        "initial_velocity": initial_velocity,
+        "release_angle": release_angle,
+        "roughness": roughness,
+        "seam_angle": seam_angle,
+        "physics_url": "http://simplephysics:8000"
     })
 
     # Extract y positions (lateral deviation)
-    y_positions = np.array(trajectory_result['y_positions'])
+    y_positions = trajectory_result['y_positions']
 
-    # Calculate maximum absolute deviation from initial y=0 position
-    max_deviation = np.max(np.abs(y_positions)) * 100  # Convert to cm
+    # Get final lateral position (y component at the end of the pitch)
+    final_deviation = y_positions[-1] * 100  # Convert to cm
 
-    return max_deviation
+    return final_deviation
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    """Apply the swing tesseract to get maximum deviation from trajectory"""
-    # Get trajectory from integrator and compute maximum deviation
-    max_deviation = compute_maximum_deviation(
+    """Apply the swing tesseract to get final deviation from trajectory"""
+    # Get trajectory from integrator and compute final deviation
+    final_deviation = compute_final_deviation(
         initial_velocity=inputs.initial_velocity,
         release_angle=inputs.release_angle,
         roughness=inputs.roughness,
-        seam_angle=inputs.seam_angle,
-        physics_url=inputs.physics_url,
-        integrator_url=inputs.integrator_url
+        seam_angle=inputs.seam_angle
     )
 
-    # Return maximum deviation
-    return OutputSchema(maximum_deviation=max_deviation)
+    # Return final deviation
+    return OutputSchema(final_deviation=final_deviation)
+
+
+def apply_jit(inputs: dict) -> dict:
+    """JAX-compatible entry point for AD"""
+    # Extract inputs directly
+    initial_velocity = inputs["initial_velocity"]
+    release_angle = inputs["release_angle"]
+    roughness = inputs["roughness"]
+    seam_angle = inputs["seam_angle"]
+
+    # Call the computation function directly
+    final_deviation = compute_final_deviation(
+        initial_velocity=initial_velocity,
+        release_angle=release_angle,
+        roughness=roughness,
+        seam_angle=seam_angle
+    )
+
+    return {"final_deviation": final_deviation}
+
+
+def abstract_eval(abstract_inputs: InputSchema) -> dict:
+    """Abstract evaluation for JAX AD support"""
+    return {"final_deviation": ShapeDType(shape=(), dtype="float32")}
 
 
 #

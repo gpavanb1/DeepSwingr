@@ -4,6 +4,7 @@ Docker environment setup and management for tesseract containers
 import subprocess
 import sys
 import time
+from tesseract_core import Tesseract
 
 
 def check_docker_network(network_name: str) -> bool:
@@ -50,9 +51,9 @@ def ensure_docker_network(network_name: str) -> bool:
         sys.exit(1)
 
 
-def ensure_physics_container(container_name: str, image_name: str,
-                             network_name: str, host_port: int):
-    """Start a physics container if not already running"""
+def ensure_container(container_name: str, image_name: str,
+                     network_name: str, host_port: int):
+    """Start a container if not already running"""
     print(f"\n🔍 Checking {container_name} container...")
 
     # Check if already running
@@ -127,13 +128,15 @@ def ensure_physics_container(container_name: str, image_name: str,
 
 def ensure_simplephysics_container(network_name: str):
     """Start simplephysics container if not already running"""
-    ensure_physics_container(
+    ensure_container(
         "simplephysics", "simplephysics", network_name, 8000)
 
 
 def ensure_jaxphysics_container(network_name: str):
     """Start jaxphysics container if not already running"""
-    ensure_physics_container("jaxphysics", "jaxphysics", network_name, 8001)
+    ensure_container("jaxphysics", "jaxphysics", network_name, 8001)
+
+
 
 
 def prepare_docker_environment(network_name: str, use_jaxphysics: bool = True):
@@ -153,7 +156,7 @@ def cleanup_containers():
     """Stop and remove containers"""
     print("\n🧹 Cleaning up all containers...")
 
-    containers = ["simplephysics", "jaxphysics", "integrator"]
+    containers = ["simplephysics", "jaxphysics", "integrator", "swing", "optimiser"]
     for container in containers:
         subprocess.run(["docker", "stop", container],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -161,3 +164,24 @@ def cleanup_containers():
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     print("✓ Cleanup complete")
+
+
+def setup_tesseracts(network_name="tesseract_network"):
+    """Setup all tesseracts (integrator, swing, optimizer)"""
+    print("🚀 Setting up tesseracts...")
+
+    # Start physics backends
+    prepare_docker_environment(network_name, use_jaxphysics=False)
+
+    # Start tesseracts with external port mappings
+    ensure_container("integrator", "integrator", network_name, 8002)
+    ensure_container("swing", "swing", network_name, 8003)
+    ensure_container("optimiser", "optimiser", network_name, 8004)
+
+    # Connect to running tesseracts
+    integrator = Tesseract.from_url("http://localhost:8002")
+    swing = Tesseract.from_url("http://localhost:8003")
+    optimizer = Tesseract.from_url("http://localhost:8004")
+
+    print("✓ Tesseracts ready")
+    return integrator, swing, optimizer

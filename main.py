@@ -1,192 +1,243 @@
 """
-Main Pipeline - Tesseract Hackathon Template
+Minimal Main - Tesseract Cricket Ball Simulator
 
-This script demonstrates usage of the integrator tesseract which can talk to
-both simplephysics and jaxphysics backends for trajectory simulation.
+Functions:
+- show_trajectory: Display trajectory for given parameters
+- plot_optimal: Plot optimal swing vs speed and notch_angle
 """
-from helper.docker import prepare_docker_environment, cleanup_containers
-from tesseract_core import Tesseract
-from plotter.plt import plot_trajectory_3d, animate_trajectory, compare_deliveries
-from plotter.interactive import scenarios
+import numpy as np
+import matplotlib.pyplot as plt
+from helper.docker import setup_tesseracts, cleanup_containers
+from plotter.plt import plot_trajectory_3d
 
 
-def integrator_tesseract_demo():
+def show_trajectory(initial_velocity=35.0, release_angle=5.0, roughness=0.8, seam_angle=30.0,
+                   physics_url="http://simplephysics:8000"):
+    """
+    Show trajectory for given parameter set
+
+    Args:
+        initial_velocity: Ball speed in m/s
+        release_angle: Release angle in degrees
+        roughness: Surface roughness [0.0, 1.0]
+        seam_angle: Seam angle in degrees [-90, 90]
+        physics_url: Physics backend URL
+    """
     network_name = "tesseract_network"
 
-    # Start both physics backends (simplephysics on 8000, jaxphysics on 8001)
-    prepare_docker_environment(network_name, use_jaxphysics=True)
-
-    print(f"\n🚀 Starting integrator...")
-
-    # Start integrator that will call physics backends
-    integrator = Tesseract.from_image(
-        "integrator",
-        network=network_name,
-        network_alias="integrator"
-    )
-
     try:
+        print(f"🚀 Setting up Docker environment...")
+        integrator, swing, optimizer = setup_tesseracts(network_name)
+
+        print(f"📡 Connecting to integrator...")
         with integrator:
-            print("✓ Integrator started\n")
+            print("\n📊 Computing trajectory...")
+            print(f"  Speed: {initial_velocity:.1f} m/s")
+            print(f"  Release angle: {release_angle:.1f}°")
+            print(f"  Roughness: {roughness:.1f}")
+            print(f"  Seam angle: {seam_angle:.1f}°")
 
-            # Store results for comparison
-            all_results = []
+            # Get trajectory
+            params = {
+                "initial_velocity": initial_velocity,
+                "release_angle": release_angle,
+                "roughness": roughness,
+                "seam_angle": seam_angle,
+                "physics_url": physics_url
+            }
 
-            for key, scenario in scenarios.items():
-                if key == "5":
-                    continue
+            print(f"🔄 Calling integrator with params: {params}")
+            result = integrator.apply(params)
+            print(f"✅ Integrator returned result with {len(result.get('times', []))} time points")
 
-                print(f"\n{'='*60}")
-                print(f"Simulating: {scenario['name']}")
-                print(f"{'='*60}")
-                print(f"  Speed: {scenario['velocity']*3.6:.1f} km/h")
-                print(f"  Release angle: {scenario['angle']}°")
-                print(f"  Roughness: {scenario['roughness']}")
-                print(f"  Seam angle: {scenario['seam_angle']}°")
+            # Plot trajectory
+            fig = plot_trajectory_3d(
+                result["times"],
+                result["x_positions"],
+                result["y_positions"],
+                result["z_positions"],
+                result.get("velocities"),
+                initial_velocity,
+                roughness,
+                seam_angle,
+                use_plotly=True
+            )
+            fig.show()
 
-                params = {
-                    "initial_velocity": scenario["velocity"],
-                    "release_angle": scenario["angle"],
-                    "roughness": scenario["roughness"],
-                    "seam_angle": scenario["seam_angle"],
-                }
-
-                simple_result = None
-                jax_result = None
-
-                # Run with simplephysics backend
-                try:
-                    print("  🔄 Running with simplephysics backend...")
-                    params_simple = {
-                        **params, "physics_url": "http://simplephysics:8000"}
-                    simple_result = integrator.apply(params_simple)
-                    print("  ✓ Simplephysics simulation complete")
-                except Exception as e:
-                    print(f"  ❌ Simplephysics error: {e}")
-
-                # Run with jaxphysics backend
-                try:
-                    print("  🔄 Running with jaxphysics backend...")
-                    params_jax = {
-                        **params, "physics_url": "http://jaxphysics:8000"}
-                    jax_result = integrator.apply(params_jax)
-                    print("  ✓ Jaxphysics simulation complete")
-                except Exception as e:
-                    print(f"  ❌ Jaxphysics error: {e}")
-
-                # Generate plot with both if available
-                if simple_result is not None or jax_result is not None:
-                    print("  📊 Generating plots...")
-                    try:
-                        # Build trajectory data for both physics engines
-                        trajectories = []
-
-                        if simple_result is not None:
-                            trajectories.append({
-                                "name": "Simplephysics",
-                                "times": simple_result["times"],
-                                "x": simple_result["x_positions"],
-                                "y": simple_result["y_positions"],
-                                "z": simple_result["z_positions"],
-                                "velocities": simple_result.get("velocities", None)
-                            })
-
-                        if jax_result is not None:
-                            trajectories.append({
-                                "name": "Jaxphysics (CFD)",
-                                "times": jax_result["times"],
-                                "x": jax_result["x_positions"],
-                                "y": jax_result["y_positions"],
-                                "z": jax_result["z_positions"],
-                                "velocities": jax_result.get("velocities", None)
-                            })
-
-                        # Use first available result for backward compatibility with old plot API
-                        primary = simple_result if simple_result is not None else jax_result
-
-                        # 3D trajectory plot
-                        fig_3d = plot_trajectory_3d(
-                            primary["times"],
-                            primary["x_positions"],
-                            primary["y_positions"],
-                            primary["z_positions"],
-                            primary.get("velocities"),
-                            scenario["velocity"],
-                            scenario["roughness"],
-                            scenario["seam_angle"],
-                            use_plotly=True,
-                            # Pass both trajectories for comparison if plot supports it
-                            all_trajectories=trajectories
-                        )
-                        fig_3d.show()
-                        print("  ✓ Plot displayed")
-                    except Exception as e:
-                        print(f"  ⚠️  Plot error: {e}")
-
-                    # Store results for comparison
-                    all_results.append({
-                        "name": scenario["name"],
-                        "velocity": scenario["velocity"],
-                        "angle": scenario["angle"],
-                        "roughness": scenario["roughness"],
-                        "seam_angle": scenario["seam_angle"],
-                        "simple": simple_result,
-                        "jax": jax_result
-                    })
-
-            # Show comparison of all deliveries
-            if len(all_results) > 1:
-                print("\n📊 Generating delivery comparison...")
-
-                # Prepare data for compare_deliveries
-                # Format: list of (name, velocity, angle, roughness, seam_angle, times, x, y, z)
-                comparison_data = []
-
-                for r in all_results:
-                    if r["simple"] is not None:
-                        comparison_data.append((
-                            f"{r['name']} (Simple)",
-                            r["velocity"],
-                            r["angle"],
-                            r["roughness"],
-                            r["seam_angle"],
-                            r["simple"]["times"],
-                            r["simple"]["x_positions"],
-                            r["simple"]["y_positions"],
-                            r["simple"]["z_positions"]
-                        ))
-
-                    if r["jax"] is not None:
-                        comparison_data.append((
-                            f"{r['name']} (JAX-CFD)",
-                            r["velocity"],
-                            r["angle"],
-                            r["roughness"],
-                            r["seam_angle"],
-                            r["jax"]["times"],
-                            r["jax"]["x_positions"],
-                            r["jax"]["y_positions"],
-                            r["jax"]["z_positions"]
-                        ))
-
-                if comparison_data:
-                    compare_deliveries(comparison_data)
-                    print("  ✓ Comparison displayed")
-
+            # Print summary
+            final_y = result["y_positions"][-1]
+            print(f"  Final lateral deviation: {final_y:.4f} m")
     except Exception as e:
-        print(f"\n❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"❌ Error: {e}")
     finally:
-        print("\n🛑 Cleaning up containers...")
         cleanup_containers()
 
 
-def main() -> None:
+def plot_optimal(roughness=0.8, release_angle=5.0, swing_type="reverse",
+                speed_range=[30, 40], angle_range=[-45, 45],
+                n_points=10):
+    """
+    Plot optimal swing vs speed and notch_angle for specified roughness and release angle
+
+    Args:
+        roughness: Fixed surface roughness
+        release_angle: Fixed release angle in degrees
+        swing_type: "in", "out", or "reverse"
+        speed_range: [min_speed, max_speed] in m/s
+        angle_range: [min_angle, max_angle] in degrees
+        n_points: Number of points to sample in each dimension
+    """
+    network_name = "tesseract_network"
+
     try:
-        integrator_tesseract_demo()
+        _, swing, optimizer = setup_tesseracts(network_name)
+
+        with optimizer:
+            print(f"\n🎯 Optimizing {swing_type} swing...")
+            print(f"  Roughness: {roughness:.1f}")
+            print(f"  Release angle: {release_angle:.1f}°")
+            # Create parameter grid
+            speeds = np.linspace(speed_range[0], speed_range[1], n_points)
+            angles = np.linspace(angle_range[0], angle_range[1], n_points)
+
+            # Store results
+            optimal_deviations = np.zeros((n_points, n_points))
+
+            for i, speed in enumerate(speeds):
+                for j, angle in enumerate(angles):
+                    try:
+                        # Optimize for this fixed speed/angle combination
+                        opt_result = optimizer.apply({
+                            "fixed_variables": {
+                                "initial_velocity": speed,
+                                "release_angle": release_angle,
+                                "roughness": roughness
+                            },
+                            "optimization_variables": {
+                                "seam_angle": [angle_range[0], angle_range[1]]  # Optimize seam angle
+                            },
+                            "swing_type": swing_type,
+                            "swing_url": "http://swing:8000",
+                            "physics_url": "http://simplephysics:8000",
+                            "integrator_url": "http://integrator:8000"
+                        })
+
+                        optimal_deviations[i, j] = opt_result["maximum_deviation"]
+
+                    except Exception as e:
+                        print(f"⚠️  Optimization failed for speed={speed:.1f}, angle={angle:.1f}: {e}")
+                        optimal_deviations[i, j] = np.nan
+
+            # Create plot
+            fig, ax = plt.subplots(figsize=(10, 8))
+
+            # Create meshgrid
+            SPEED, ANGLE = np.meshgrid(speeds, angles)
+
+            # Plot contour
+            cs = ax.contourf(SPEED, ANGLE, optimal_deviations.T, levels=20, cmap='viridis')
+            ax.set_xlabel('Initial Velocity (m/s)')
+            ax.set_ylabel('Fixed Seam Angle (degrees)')
+            ax.set_title(f'Optimal {swing_type.capitalize()} Swing (Roughness: {roughness:.1f})')
+            plt.colorbar(cs, ax=ax, label='Maximum Deviation (cm)')
+
+            # Mark optimal point
+            max_idx = np.unravel_index(np.nanargmax(optimal_deviations), optimal_deviations.shape)
+            max_speed, max_angle = speeds[max_idx[0]], angles[max_idx[1]]
+            max_dev = optimal_deviations[max_idx]
+
+            ax.plot(max_speed, max_angle, 'ro', markersize=10, label=f'Optimal: {max_dev:.2f} cm')
+            ax.legend()
+
+            plt.tight_layout()
+            plt.show()
+
+            print(f"\n💡 Global optimum found:")
+            print(f"  Speed: {max_speed:.1f} m/s")
+            print(f"  Seam angle: {max_angle:.1f}°")
+            print(f"  Maximum deviation: {max_dev:.2f} cm")
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        cleanup_containers()
+
+
+def interactive_menu():
+    """Interactive menu to choose between functions"""
+    print("🎾 Cricket Ball Swing Simulator")
+    print("=" * 40)
+    print("Choose an option:")
+    print("1. Show trajectory for specific parameters")
+    print("2. Plot optimal swing landscape")
+    print("3. Exit")
+
+    while True:
+        try:
+            choice = input("\nEnter choice (1-3): ").strip()
+
+            if choice == "1":
+                print("\n📊 Show Trajectory")
+                print("-" * 20)
+
+                # Get parameters with defaults
+                vel = input("Initial velocity (m/s) [35.0]: ").strip()
+                vel = float(vel) if vel else 35.0
+
+                angle = input("Release angle (degrees) [5.0]: ").strip()
+                angle = float(angle) if angle else 5.0
+
+                rough = input("Roughness [0.8]: ").strip()
+                rough = float(rough) if rough else 0.8
+
+                seam = input("Seam angle (degrees) [30.0]: ").strip()
+                seam = float(seam) if seam else 30.0
+
+                show_trajectory(vel, angle, rough, seam)
+
+            elif choice == "2":
+                print("\n🎯 Plot Optimal Swing")
+                print("-" * 25)
+
+                # Get parameters with defaults
+                rough = input("Roughness [0.8]: ").strip()
+                rough = float(rough) if rough else 0.8
+
+                angle = input("Release angle (degrees) [5.0]: ").strip()
+                angle = float(angle) if angle else 5.0
+
+                swing_type = input("Swing type (in/out/reverse) [reverse]: ").strip().lower()
+                swing_type = swing_type if swing_type in ["in", "out", "reverse"] else "reverse"
+
+                print(f"Generating plot for {swing_type} swing...")
+                plot_optimal(rough, angle, swing_type)
+
+            elif choice == "3":
+                print("\n👋 Goodbye!")
+                break
+
+            else:
+                print("❌ Invalid choice. Please enter 1, 2, or 3.")
+
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Interrupted by user")
+            break
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            print("Please try again.")
+
+
+def main():
+    """Main entry point - run interactive menu"""
+    try:
+        interactive_menu()
     except KeyboardInterrupt:
         print("\n\n⚠️  Interrupted by user")
+    except Exception as e:
+        print(f"❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

@@ -28,7 +28,7 @@ def plot_optimal(r=0.8, a=5.0, swing_type="out", speed_range=[30, 40], n=5, back
             try:
                 res = opt.apply({
                     "fixed_variables": {"initial_velocity": v, "release_angle": a, "roughness": r},
-                    "optimization_variables": {"seam_angle": [-45, 45]},
+                    "optimization_variables": {"seam_angle": [-90, 90]},
                     "swing_type": swing_type,
                     "physics_url": url
                 })

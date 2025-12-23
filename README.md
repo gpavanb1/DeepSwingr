@@ -79,7 +79,7 @@ When you call `.jacobian()` or `.vjp()` on a Tesseract, the gradients are propag
 
     ```bash
     git clone <your-repo-url>
-    cd tesseract-hackathon-template
+    cd deepswingr
     python3 -m venv .venv
     source .venv/bin/activate
     pip install -r requirements.txt

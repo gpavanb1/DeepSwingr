@@ -1,10 +1,13 @@
 """
 Cricket Ball Trajectory Simulator
 Simulates ball flight over 22 yards using configurable physics backend.
+Uses Diffrax for JAX-native differentiable integration.
 """
-import numpy as np
+import jax
+import jax.numpy as jnp
+import diffrax as dfx
 from tesseract_core import Tesseract
-from scipy.integrate import solve_ivp
+from tesseract_jax import apply_tesseract
 
 
 def simulate_trajectory(
@@ -13,25 +16,12 @@ def simulate_trajectory(
     roughness: float,
     seam_angle: float,
     physics_url: str = "http://simplephysics:8000",
-    dt: float = 0.001,
+    dt: float = 0.08, # Increased default dt for faster simulation
     pitch_length: float = 20.12,
     debug: bool = False
 ):
     """
-    Simulate cricket ball trajectory using configurable physics backend.
-
-    Args:
-        initial_velocity: Initial ball velocity in m/s
-        release_angle: Release angle in degrees
-        roughness: Surface roughness coefficient [0.0, 1.0]
-        seam_angle: Seam angle in degrees [-90, 90]
-        physics_url: URL of physics tesseract (simplephysics or jaxphysics)
-        dt: Time step for integration
-        pitch_length: Length of cricket pitch in meters
-        debug: Print debug information
-
-    Returns:
-        times, x_positions, y_positions, z_positions, velocities
+    Simulate cricket ball trajectory using Diffrax and configurable physics.
     """
     # Constants
     mass = 0.156  # kg
@@ -40,46 +30,33 @@ def simulate_trajectory(
     mu = 1.5e-5  # Pa·s
     g = 9.81  # m/s²
 
-    # Initial conditions
-    theta = np.deg2rad(release_angle)
-    v0_x = initial_velocity * np.cos(theta)
-    v0_y = 0.0
-    v0_z = initial_velocity * np.sin(theta)
-
-    y0 = [0.0, 0.0, 2.0,  # Initial positions (x, y, z)
-          v0_x, v0_y, v0_z]  # Initial velocities (vx, vy, vz)
-
-    # Connect to physics backend via URL
+    # Connect to physics backend
     physics = Tesseract.from_url(physics_url)
 
-    if debug:
-        print(f"Using physics backend: {physics_url}")
-
-    def ball_dynamics(t, y):
+    def ball_dynamics(t, y, args):
         """System of ODEs for ball motion."""
         x, y_pos, z, vx, vy, vz = y
 
         # Calculate velocity magnitude and Reynolds number
-        v_mag = np.sqrt(vx**2 + vy**2 + vz**2)
+        v_mag = jnp.sqrt(vx**2 + vy**2 + vz**2)
         Re = rho_air * v_mag * diameter / mu
-        Re = np.clip(Re, 1e5, 1e6)
+        Re = jnp.clip(Re, 1e5, 1e6)
 
-        if v_mag < 1e-6:
-            return [0, 0, 0, 0, 0, 0]
-
-        # Get forces from physics tesseract
-        forces = physics.apply({
+        # Get forces from physics tesseract differentiably
+        forces_res = apply_tesseract(physics, {
             "notch_angle": seam_angle,
-            "reynolds_number": float(Re),
+            "reynolds_number": Re,
             "roughness": roughness
-        })['force_vector']
+        })
+        forces = forces_res['force_vector']
 
-        # Unit vectors for velocity components
-        vx_norm = vx / v_mag
-        vy_norm = vy / v_mag
-        vz_norm = vz / v_mag
+        # Unit vectors
+        v_safe = v_mag + 1e-6
+        vx_norm = vx / v_safe
+        vy_norm = vy / v_safe
+        vz_norm = vz / v_safe
 
-        # Force components
+        # Force components: forces[0]=drag, forces[1]=lift, forces[2]=swing
         F_drag_x = -forces[0] * vx_norm
         F_drag_y = -forces[0] * vy_norm
         F_drag_z = -forces[0] * vz_norm
@@ -97,53 +74,63 @@ def simulate_trajectory(
         ay = Fy / mass
         az = Fz / mass
 
-        return [vx, vy, vz, ax, ay, az]
+        # Use a soft switch for ground/pitch end to keep gradients flowing
+        active = jnp.logical_and(z > 0.0, x < pitch_length)
+        
+        return jnp.where(
+            active,
+            jnp.array([vx, vy, vz, ax, ay, az]),
+            jnp.zeros(6)
+        )
 
-    def event_ground_or_pitch(t, y):
-        """Stop integration when ball hits ground or reaches pitch length."""
-        return min(y[2], pitch_length - y[0])  # z=0 or x=pitch_length
+    # Initial conditions
+    theta = jnp.deg2rad(release_angle)
+    v0_x = initial_velocity * jnp.cos(theta)
+    v0_y = 0.0
+    v0_z = initial_velocity * jnp.sin(theta)
 
-    event_ground_or_pitch.terminal = True
+    y0 = jnp.array([0.0, 0.0, 2.0, v0_x, v0_y, v0_z])
 
     # Solve ODE system
-    t_span = (0, 5.0)  # Max time 5 seconds
-    t_eval = np.arange(0, 5.0, dt)
+    term = dfx.ODETerm(ball_dynamics)
+    
+    # Use Heun's method (2nd order) for faster execution
+    solver = dfx.Heun()
+    
+    # We want exactly 500 points for the trajectory
+    max_steps = 500
+    t0, t1 = 0.0, 1.2  # Ball always finishes before 1.2s
+    
+    # Use SaveAt to get exactly 500 points
+    saveat = dfx.SaveAt(ts=jnp.linspace(t0, t1, max_steps))
+    
+    # Use RecursiveCheckpointAdjoint for MUCH faster gradients
+    # and ConstantStepSize to avoid adaptive overhead
+    @jax.jit
+    def run_solve(y0_val):
+        return dfx.diffeqsolve(
+            term,
+            solver,
+            t0=t0,
+            t1=t1,
+            dt0=dt,
+            y0=y0_val,
+            saveat=saveat,
+            stepsize_controller=dfx.ConstantStepSize(),
+            adjoint=dfx.RecursiveCheckpointAdjoint(),
+            max_steps=max_steps,
+        )
 
-    solution = solve_ivp(
-        ball_dynamics,
-        t_span,
-        y0,
-        method='RK45',
-        t_eval=t_eval,
-        events=event_ground_or_pitch,
-        rtol=1e-6,
-        atol=1e-6
-    )
+    sol = run_solve(y0)
 
-    # Extract results
-    times = solution.t
-    positions = np.column_stack([
-        solution.y[0],  # x positions
-        solution.y[1],  # y positions
-        solution.y[2]   # z positions
-    ])
+    times = sol.ts
+    x = sol.ys[:, 0]
+    y = sol.ys[:, 1]
+    z = sol.ys[:, 2]
+    vx = sol.ys[:, 3]
+    vy = sol.ys[:, 4]
+    vz = sol.ys[:, 5]
+    
+    velocities = jnp.stack([vx, vy, vz], axis=-1)
 
-    velocities = np.column_stack([
-        solution.y[3],  # vx
-        solution.y[4],  # vy
-        solution.y[5]   # vz
-    ])
-
-    if debug:
-        physics_name = "JAX-CFD" if "jaxphysics" in physics_url else "Simple"
-        print(f"\n[{physics_name}] Final statistics:")
-        print(f"  Total steps: {len(times)}")
-        print(f"  Flight time: {times[-1]:.3f}s")
-        print(f"  Distance: {positions[-1, 0]:.2f}m")
-        print(f"  Lateral deviation: {abs(positions[-1, 1])*100:.2f}cm")
-        print(
-            f"  Final position: x={positions[-1, 0]:.2f}, y={positions[-1, 1]:.4f}, z={positions[-1, 2]:.2f}")
-        print(
-            f"  Y range: min={positions[:, 1].min():.4f}, max={positions[:, 1].max():.4f}")
-
-    return times, positions[:, 0], positions[:, 1], positions[:, 2], velocities
+    return times, x, y, z, velocities

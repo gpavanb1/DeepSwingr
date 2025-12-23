@@ -18,7 +18,7 @@ import jax.numpy as jnp
 from pydantic import BaseModel, Field, model_validator
 from typing_extensions import Self
 
-from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
 
 # Define path to weights file relative to this file location
 this_dir = pathlib.Path(__file__).parent
@@ -37,15 +37,23 @@ class InputSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_inputs(self) -> Self:
-        if not (-90.0 <= self.notch_angle <= 90.0):
-            raise ValueError(
-                f"notch_angle must be in [-90, 90]. Got {self.notch_angle}")
-        if not (1e5 <= self.reynolds_number <= 1e6):
-            raise ValueError(
-                f"reynolds_number must be in [1e5, 1e6]. Got {self.reynolds_number}")
-        if not (0.0 <= self.roughness <= 1.0):
-            raise ValueError(
-                f"roughness must be in [0.0, 1.0]. Got {self.roughness}")
+        # Only validate if these are not JAX tracers or ShapeDType objects
+        # During abstract_eval, these might be ShapeDType or tracers
+        def is_concrete(val):
+            return not hasattr(val, "shape") and not hasattr(val, "dtype")
+
+        if is_concrete(self.notch_angle):
+            if not (-90.0 <= self.notch_angle <= 90.0):
+                raise ValueError(
+                    f"notch_angle must be in [-90, 90]. Got {self.notch_angle}")
+        if is_concrete(self.reynolds_number):
+            if not (1e5 <= self.reynolds_number <= 1e6):
+                raise ValueError(
+                    f"reynolds_number must be in [1e5, 1e6]. Got {self.reynolds_number}")
+        if is_concrete(self.roughness):
+            if not (0.0 <= self.roughness <= 1.0):
+                raise ValueError(
+                    f"roughness must be in [0.0, 1.0]. Got {self.roughness}")
         return self
 
 
@@ -108,6 +116,11 @@ def apply(inputs: InputSchema) -> OutputSchema:
 
     # Return OutputSchema object
     return OutputSchema(**out)
+
+
+def abstract_eval(abstract_inputs: InputSchema) -> dict:
+    """Abstract evaluation for JAX AD support"""
+    return {"force_vector": ShapeDType(shape=(3,), dtype="float32")}
 
 
 #

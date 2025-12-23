@@ -356,74 +356,30 @@ def plot_trajectory_3d_interactive_multi(trajectories, initial_velocity, roughne
     return fig
 
 
-def plot_trajectory_3d_interactive(x, y, z, initial_velocity, roughness, seam_angle):
-    """Create interactive 3D plot using Plotly (single trajectory)."""
-    if not PLOTLY_AVAILABLE:
-        return None
+def plot_optimization_results(speeds, devs, angles, swing_type, roughness):
+    """Plot optimal swing and seam angle vs speed"""
+    valid = ~np.isnan(devs)
+    if not np.any(valid):
+        print("No valid results to plot.")
+        return
 
-    trajectory = go.Scatter3d(
-        x=x, y=y, z=z,
-        mode='lines',
-        line=dict(color='blue', width=4),
-        name='Ball path',
-        hovertemplate='Distance: %{x:.2f}m<br>Lateral: %{y:.2f}m<br>Height: %{z:.2f}m<extra></extra>'
-    )
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    # Plot Deviation
+    color_dev = 'tab:blue'
+    ax1.set_xlabel('Speed (m/s)')
+    ax1.set_ylabel('Max Deviation (cm)', color=color_dev)
+    ax1.plot(speeds[valid], devs[valid], color=color_dev, marker='o', label='Deviation')
+    ax1.tick_params(axis='y', labelcolor=color_dev)
+    ax1.grid(True, alpha=0.3)
 
-    release = go.Scatter3d(
-        x=[x[0]], y=[y[0]], z=[z[0]],
-        mode='markers',
-        marker=dict(size=8, color='green', symbol='circle'),
-        name='Release',
-        hovertext=f'Release: {initial_velocity*3.6:.1f} km/h'
-    )
+    # Create secondary axis for Seam Angle
+    ax2 = ax1.twinx()
+    color_angle = 'tab:red'
+    ax2.set_ylabel('Optimal Seam Angle (deg)', color=color_angle)
+    ax2.plot(speeds[valid], angles[valid], color=color_angle, marker='s', linestyle='--', label='Seam Angle')
+    ax2.tick_params(axis='y', labelcolor=color_angle)
 
-    landing = go.Scatter3d(
-        x=[x[-1]], y=[y[-1]], z=[z[-1]],
-        mode='markers',
-        marker=dict(size=8, color='red', symbol='x'),
-        name='Landing',
-        hovertext=f'Swing: {abs(y[-1]-y[0])*100:.1f} cm'
-    )
-
-    pitch_x = [0, 20.12, 20.12, 0, 0]
-    pitch_y_left = [-1.22, -1.22, -1.22, -1.22, -1.22]
-    pitch_y_right = [1.22, 1.22, 1.22, 1.22, 1.22]
-    pitch_z = [0, 0, 0, 0, 0]
-
-    pitch_left = go.Scatter3d(
-        x=pitch_x, y=pitch_y_left, z=pitch_z,
-        mode='lines', line=dict(color='brown', width=2),
-        showlegend=False, hoverinfo='skip'
-    )
-
-    pitch_right = go.Scatter3d(
-        x=pitch_x, y=pitch_y_right, z=pitch_z,
-        mode='lines', line=dict(color='brown', width=2),
-        showlegend=False, hoverinfo='skip'
-    )
-
-    center_line = go.Scatter3d(
-        x=[0, 20.12], y=[0, 0], z=[0, 0],
-        mode='lines', line=dict(color='black', width=1, dash='dash'),
-        showlegend=False, hoverinfo='skip'
-    )
-
-    fig = go.Figure(data=[trajectory, release, landing,
-                    pitch_left, pitch_right, center_line])
-
-    fig.update_layout(
-        title=f'Interactive 3D Trajectory<br><sub>Roughness: {roughness:.2f}, Seam: {seam_angle:.0f}°, Speed: {initial_velocity*3.6:.0f} km/h</sub>',
-        scene=dict(
-            xaxis=dict(title='Distance (m)', range=[0, 22]),
-            yaxis=dict(title='Lateral (m)', range=[-2, 2]),
-            zaxis=dict(title='Height (m)', range=[0, 3]),
-            aspectmode='manual',
-            aspectratio=dict(x=2, y=0.5, z=0.3),
-            camera=dict(eye=dict(x=1.5, y=-1.5, z=0.8))
-        ),
-        width=900,
-        height=600,
-        hovermode='closest'
-    )
-
-    return fig
+    plt.title(f'Optimal {swing_type.capitalize()} Swing & Seam Angle (r={roughness})')
+    fig.tight_layout()
+    plt.show()

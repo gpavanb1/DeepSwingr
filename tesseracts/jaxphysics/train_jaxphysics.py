@@ -8,16 +8,17 @@ for use by the deployed jaxphysics tesseract for inference.
 
 import os
 import jax
-from jax import random
+from jax import random, vmap, jit
 import flax.linen as nn
 from flax.training import train_state, checkpoints
 import optax
 import jax.numpy as jnp
+from functools import partial
 
-from physics import CricketBallForceNetwork, compute_loss_with_cfd, train_step_with_cfd
+from physics import CricketBallForceNetwork, cfd_solve_navier_stokes
 
 
-def create_train_state(rng, learning_rate=3e-4):
+def create_train_state(rng, learning_rate=1e-3):
     """Create initial training state."""
     model = CricketBallForceNetwork()
     params = model.init(rng, jnp.ones(3))
@@ -30,6 +31,54 @@ def create_train_state(rng, learning_rate=3e-4):
         params=params,
         tx=tx,
     )
+
+
+def compute_loss_with_cfd(params, apply_fn, batch_inputs):
+    """CFD solver runs HERE in the loss function!"""
+    nn_predictions = vmap(lambda x: apply_fn(params, x))(batch_inputs)
+
+    # This is where the magic happens - CFD runs during training!
+    cfd_truth = vmap(cfd_solve_navier_stokes)(
+        batch_inputs[:, 0],
+        batch_inputs[:, 1],
+        batch_inputs[:, 2]
+    )
+
+    nn_predictions = jnp.nan_to_num(
+        nn_predictions, nan=0.0, posinf=1.0, neginf=-1.0)
+    cfd_truth = jnp.nan_to_num(cfd_truth, nan=0.0, posinf=1.0, neginf=-1.0)
+
+    mse = jnp.mean((nn_predictions - cfd_truth) ** 2)
+
+    # Physical constraints
+    drag_predictions = nn_predictions[:, 0]
+    # Drag must be positive
+    drag_penalty = jnp.mean(jnp.maximum(-drag_predictions, 0.0)**2)
+
+    magnitude_penalty = jnp.mean(jnp.maximum(
+        jnp.linalg.norm(nn_predictions, axis=1) - 10.0, 0.0)**2)
+
+    total_loss = mse + 0.1 * drag_penalty + 0.01 * magnitude_penalty
+
+    metrics = {
+        'mse': mse,
+        'drag_penalty': drag_penalty,
+        'mag_penalty': magnitude_penalty,
+        'total': total_loss
+    }
+
+    return total_loss, metrics
+
+
+@partial(jit, static_argnums=(1,))
+def train_step_with_cfd(state, apply_fn, batch_inputs):
+    """Training step where CFD runs for every batch!"""
+    (loss, metrics), grads = jax.value_and_grad(
+        compute_loss_with_cfd, has_aux=True
+    )(state.params, apply_fn, batch_inputs)
+
+    state = state.apply_gradients(grads=grads)
+    return state, loss, metrics
 
 
 def train_model(

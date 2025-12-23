@@ -34,6 +34,36 @@ The project follows a highly modular architecture where different physical compo
 3.  **Swing Logic (`swing`)**: A high-level tesseract that orchestrates the integrator and physics backend to determine the final deviation of the ball.
 4.  **Optimiser (`optimiser`)**: Searches for optimal parameters (e.g., the best seam angle for maximum swing) by interacting with the `swing` tesseract.
 
+## Adding a New Physics Backend
+
+The DeepSwingr framework is designed to be easily extensible. You can plug in a new physics engine (e.g., a more advanced 3D CFD, a different ML proxy, or even a hardware-in-the-loop sensor) by following these steps:
+
+### 1. Create the Tesseract
+Create a new directory in `tesseracts/your_new_backend/` with a `tesseract_api.py`. It must implement the standard physics interface:
+
+- **Input**: `notch_angle` (float), `reynolds_number` (float), `roughness` (float).
+- **Output**: `force_vector` (Array of 3 floats: [drag, lift, side]).
+
+### 2. Register the Backend
+Add your new backend to the `PHYSICS_BACKENDS` registry in `helper/docker.py`:
+
+```python
+PHYSICS_BACKENDS = {
+    # ... existing backends ...
+    "your_new_backend": {
+        "container": "your_new_backend",
+        "image": "your_new_backend",
+        "port": 8005,  # Unique port
+        "url": "http://your_new_backend:8000" # Internal Docker URL
+    }
+}
+```
+
+### 3. Build and Run
+1. Add your backend to `buildall.sh` (or just run `tesseract build tesseracts/your_new_backend`).
+2. Run `python main.py`. Your new backend will automatically appear in the "Configure Physics Backend" menu.
+3. The `integrator`, `swing`, and `optimiser` tesseracts will automatically route their requests to your new backend when selected.
+
 ## ML Proxies for Physics
 
 This project utilizes **Machine Learning Proxies** to achieve high-performance, differentiable physics simulations.

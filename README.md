@@ -39,12 +39,14 @@ The project follows a highly modular architecture where different physical compo
 The DeepSwingr framework is designed to be easily extensible. You can plug in a new physics engine (e.g., a more advanced 3D CFD, a different ML proxy, or even a hardware-in-the-loop sensor) by following these steps:
 
 ### 1. Create the Tesseract
+
 Create a new directory in `tesseracts/your_new_backend/` with a `tesseract_api.py`. It must implement the standard physics interface:
 
 - **Input**: `notch_angle` (float), `reynolds_number` (float), `roughness` (float).
 - **Output**: `force_vector` (Array of 3 floats: [drag, lift, side]).
 
 ### 2. Register the Backend
+
 Add your new backend to the `PHYSICS_BACKENDS` registry in `helper/docker.py`:
 
 ```python
@@ -60,6 +62,7 @@ PHYSICS_BACKENDS = {
 ```
 
 ### 3. Build and Run
+
 1. Add your backend to `buildall.sh` (or just run `tesseract build tesseracts/your_new_backend`).
 2. Run `python main.py`. Your new backend will automatically appear in the "Configure Physics Backend" menu.
 3. The `integrator`, `swing`, and `optimiser` tesseracts will automatically route their requests to your new backend when selected.
@@ -72,17 +75,14 @@ Instead of running a computationally expensive Navier-Stokes solver (CFD) during
 
 ### Proxy Training
 
-The `trainall.sh` script automates the generation of these ML proxies. When executed, it:
+The `trainall.sh` script automates the generation of these ML proxies. There are two models provided at the moment - `simplephysics` and `jaxphysics`, both of which are "toy" models with scaling factors. The `jaxphysics` model launches a **differentiable CFD solver** (powered by `jax-cfd`) to simulate flow fields around the ball. These scripts when executed, it:
 
-1.  Launches a **differentiable CFD solver** (powered by `jax-cfd`) to simulate flow fields around the ball.
-2.  Runs a training loop where the neural network is optimized to match the forces computed by the CFD solver.
-3.  Saves the learned weights as `.msgpack` files, which are then packaged into the Tesseracts for high-speed inference.
-
-Additionally, `trainall.sh` trains a **lightweight `simplephysics` model** that serves as a simpler, faster representative of the same physical problem.
+1.  Runs a training loop where the neural network is optimized to match the forces computed by the CFD solver.
+2.  Saves the learned weights as `.msgpack` files, which are then packaged into the Tesseracts for high-speed inference.
 
 ### Differentiable Forward Pass
 
-A critical advantage of this approach is that the forward pass of our ML models is built using **Flax**, **Equinox**, and **JAX**. Because these libraries are designed for differentiable programming, the entire Tesseract pipeline remains **end-to-end differentiable**.
+A critical advantage of this approach is that the forward pass of our ML models is built using **Flax**, **Equinox**, and **Diffrax**. Because these libraries are designed for differentiable programming, the entire Tesseract pipeline remains **end-to-end differentiable**.
 
 When you call `.jacobian()` or `.vjp()` on a Tesseract, the gradients are propagated directly through the neural network layers. This allows you to perform advanced tasks like:
 

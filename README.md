@@ -1,5 +1,7 @@
 # DeepSwingr: A Differentiable Framework for Cricket Ball Swing Optimization
 
+[![DOI](https://zenodo.org/badge/1116617279.svg)](https://doi.org/10.5281/zenodo.18183637)
+
 <p align="center">
   <img src="assets/logo.png" alt="DeepSwingr Logo" width="300"/>
 </p>

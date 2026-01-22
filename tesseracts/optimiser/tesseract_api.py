@@ -6,11 +6,13 @@ Tesseract API module for optimizer tesseract
 Inputs: fixed_variables, optimization_variables, swing_type, swing_url, physics_url, integrator_url
 Outputs: optimal_parameters, maximum_deviation
 """
-from typing import Any, Dict, List, Literal
+from typing import Dict, List, Literal
 import numpy as np
 import time
+import jax
+import jax.numpy as jnp
 from pydantic import BaseModel, Field, model_validator
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize_scalar, minimize
 
 from tesseract_core.runtime import Float32
 
@@ -33,6 +35,9 @@ class InputSchema(BaseModel):
     integrator_url: str = Field(
         default="http://integrator:8000",
         description="URL of integrator tesseract")
+    use_jacobian: bool = Field(
+        default=False,
+        description="Whether to use Jacobian gradients for optimization")
 
     @model_validator(mode="after")
     def validate_inputs(self):
@@ -60,62 +65,121 @@ class OutputSchema(BaseModel):
 
 
 def optimize_swing(inputs: InputSchema) -> OutputSchema:
-    """Optimize swing parameters using fast scalar search (no gradients)"""
+    """Optimize swing parameters"""
     from tesseract_core import Tesseract
+    from tesseract_jax import apply_tesseract
     swing_tesseract = Tesseract.from_url(inputs.swing_url)
 
-    # We assume 1D optimization for seam_angle as it's the primary physical variable
-    opt_var = "seam_angle"
-    if opt_var not in inputs.optimization_variables:
-        # Fallback if seam_angle isn't the target, pick the first available
-        opt_var = list(inputs.optimization_variables.keys())[0]
-        
-    bounds = inputs.optimization_variables[opt_var]
+    # Get optimization variable names and bounds
+    opt_vars = list(inputs.optimization_variables.keys())
+    opt_var = opt_vars[0] if opt_vars else "seam_angle"
     
-    def objective(x):
-        # Prepare input for swing tesseract
-        swing_inputs = {
-            **inputs.fixed_variables,
-            opt_var: float(x),
-            "physics_url": inputs.physics_url
-        }
-
-        # Just a forward pass - much faster than a .jacobian() call
-        res = swing_tesseract.apply(swing_inputs)
-        deviation = float(res["final_deviation"])
-
-        # Minimize negative deviation for "out", positive for "in"
-        # We use Brent's method which finds a minimum
-        score = deviation if inputs.swing_type == "in" else -deviation
-        
-        print(f"  Check {opt_var}={x:.2f} -> deviation={deviation:.2f} cm")
-        return score
-
-    try:
-        start_time = time.time()
-        print(f"Starting fast 1D search for optimal {opt_var}...")
-
-        # Brent's method is extremely fast for 1D smooth functions
-        result = minimize_scalar(
-            objective,
-            bounds=(bounds[0], bounds[1]),
-            method='bounded',
-            options={'xatol': 0.1, 'maxiter': 10} # 10 steps is plenty for 1D
-        )
-
-        elapsed = time.time() - start_time
-        print(f"Optimization completed in {elapsed:.1f} seconds ({result.nfev} evaluations)")
-
-    except Exception as e:
-        print(f"Optimization failed: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-
-    optimal_params = {opt_var: float(result.x)}
+    # Pre-calculate bounds for both optimization paths
+    bounds_list = []
+    x0_list = []
+    for var in opt_vars:
+        b = inputs.optimization_variables[var]
+        bounds_list.append((float(b[0]), float(b[1])))
+        x0_list.append(float(b[0] + b[1]) / 2.0)
     
-    # Final deviation is the value found by the optimizer (remembering to flip sign for 'out')
-    max_dev = -float(result.fun) if inputs.swing_type == "out" else float(result.fun)
+    # For 1D optimization (Brent)
+    current_bounds = inputs.optimization_variables[opt_var]
+
+    if inputs.use_jacobian:
+        print(f"Starting L-BFGS-B optimization using distributed AD Jacobian for {opt_vars}...")
+        
+        def objective_with_grad(x):
+            # Convert to JAX array for AD
+            x_jax = jnp.array(x)
+
+            def jax_objective(x_jax):
+                params_dict = {opt_vars[i]: x_jax[i] for i in range(len(opt_vars))}
+
+                # Prepare input for swing tesseract
+                swing_inputs = {
+                    **inputs.fixed_variables,
+                    "physics_url": inputs.physics_url
+                }
+
+                # Overwrite optimization variables with tracers
+                for var, val in params_dict.items():
+                    swing_inputs[var] = val
+
+                # Distributed AD call via tesseract-jax
+                res = apply_tesseract(swing_tesseract, swing_inputs)
+                deviation = res["final_deviation"]
+
+                return deviation if inputs.swing_type == "in" else -deviation
+
+            # Compute function value and gradient
+            score, grad_jax = jax.value_and_grad(jax_objective)(x_jax)
+            
+            grad = np.array(grad_jax).astype(float)
+            deviation = -float(score) if inputs.swing_type == "out" else float(score)
+            
+            print(f"  Check params={x} -> deviation={deviation:.2f} cm")
+            return float(score), grad
+
+        try:
+            start_time = time.time()
+            result = minimize(
+                objective_with_grad,
+                x0=x0_list,
+                bounds=bounds_list,
+                method='L-BFGS-B',
+                jac=True,
+                options={'maxiter': 20, 'ftol': 1e-3}
+            )
+            elapsed = time.time() - start_time
+            print(f"Optimization completed in {elapsed:.1f} seconds ({result.nfev} evaluations)")
+            
+            optimal_params = {opt_vars[i]: float(result.x[i]) for i in range(len(opt_vars))}
+            max_dev = -float(result.fun) if inputs.swing_type == "out" else float(result.fun)
+            
+        except Exception as e:
+            print(f"L-BFGS-B Optimization failed: {e}")
+            raise
+
+    else:
+        def objective(x):
+            # Prepare input for swing tesseract
+            swing_inputs = {
+                **inputs.fixed_variables,
+                opt_var: float(x),
+                "physics_url": inputs.physics_url
+            }
+
+            # Just a forward pass
+            res = swing_tesseract.apply(swing_inputs)
+            deviation = float(res["final_deviation"])
+
+            # Minimize negative deviation for "out", positive for "in"
+            score = deviation if inputs.swing_type == "in" else -deviation
+            
+            print(f"  Check {opt_var}={x:.2f} -> deviation={deviation:.2f} cm")
+            return score
+
+        try:
+            start_time = time.time()
+            print(f"Starting fast 1D search for optimal {opt_var}...")
+
+            # Brent's method is extremely fast for 1D smooth functions
+            result = minimize_scalar(
+                objective,
+                bounds=(current_bounds[0], current_bounds[1]),
+                method='bounded',
+                options={'xatol': 0.1, 'maxiter': 10}
+            )
+
+            elapsed = time.time() - start_time
+            print(f"Optimization completed in {elapsed:.1f} seconds ({result.nfev} evaluations)")
+            
+            optimal_params = {opt_var: float(result.x)}
+            max_dev = -float(result.fun) if inputs.swing_type == "out" else float(result.fun)
+
+        except Exception as e:
+            print(f"Brent Optimization failed: {e}")
+            raise
 
     return OutputSchema(
         optimal_parameters=optimal_params,

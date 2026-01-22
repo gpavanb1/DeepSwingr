@@ -14,12 +14,12 @@ def show_trajectory(v=35.0, a=5.0, r=0.8, s=30.0, backend="simplephysics"):
     except Exception as e:
         print(f"Error: {e}")
 
-def plot_optimal(r=0.8, a=5.0, swing_type="out", speed_range=[30, 40], n=5, backend="simplephysics"):
+def plot_optimal(r=0.8, a=5.0, swing_type="out", speed_range=[30, 40], n=5, backend="simplephysics", use_jacobian=False):
     """Plot optimal swing and seam angle vs speed"""
     try:
         url = PHYSICS_BACKENDS[backend]["url"]
         _, _, opt = get_tesseracts(backend_name=backend)
-        print(f"Optimizing {swing_type} swing using {backend}...")
+        print(f"Optimizing {swing_type} swing using {backend} (Jacobian: {use_jacobian})...")
         speeds = np.linspace(speed_range[0], speed_range[1], n)
         devs = []
         angles = []
@@ -30,6 +30,7 @@ def plot_optimal(r=0.8, a=5.0, swing_type="out", speed_range=[30, 40], n=5, back
                     "fixed_variables": {"initial_velocity": v, "release_angle": a, "roughness": r},
                     "optimization_variables": {"seam_angle": [-90, 90]},
                     "swing_type": swing_type,
+                    "use_jacobian": use_jacobian,
                     "physics_url": url
                 })
                 val = res["maximum_deviation"]
@@ -64,6 +65,8 @@ def main():
         
         print(f"Using {backend} physics backend.")
 
+        use_jacobian = input("Use Jacobian gradients for optimization? (y/n) [n]: ").lower().strip().startswith('y')
+
         while True:
             print(f"\n🎾 Cricket Ball Simulator (Backend: {backend})")
             print("1. Trajectory\n2. Optimal Swing\n3. Change Physics Backend\n4. Exit")
@@ -93,7 +96,8 @@ def main():
                     plot_optimal(
                         r=float(input("Surface roughness (0-1) [0.8]: ") or 0.8),
                         swing_type=input("Swing type (in/out) [out]: ").lower() or "out",
-                        backend=backend
+                        backend=backend,
+                        use_jacobian=use_jacobian
                     )
             except Exception as e:
                 print(f"Error: {e}")
